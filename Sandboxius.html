@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sandboxius</title>
+<style>
+:root{--bg:#e3e9f0;--fg:#16202b;--pn:#cfd8e3;--ac:#0f766e;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1620;--fg:#dbe6f2;--pn:#1c2733;--ac:#2dd4bf}}
+:root[data-theme="dark"]{--bg:#0f1620;--fg:#dbe6f2;--pn:#1c2733;--ac:#2dd4bf}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.35 ui-monospace,Menlo,Consolas,monospace;display:flex;justify-content:center;padding:10px}
+main{width:100%;max-width:960px;display:flex;flex-direction:column;gap:8px}
+h1{margin:0;font-size:22px}
+#bar,#row{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+button,select{font:inherit;color:var(--fg);background:var(--pn);border:1px solid var(--fg);padding:5px 9px;cursor:pointer}
+button.on{outline:2px solid var(--ac);outline-offset:1px}
+canvas{width:100%;aspect-ratio:8/5;image-rendering:pixelated;touch-action:none;background:#0e101a;border:2px solid var(--fg);cursor:crosshair}
+input{accent-color:var(--ac);width:90px}
+#inf{min-height:1.4em}
+</style></head><body><main>
+<h1>Sandboxius</h1><div id="bar"></div>
+<canvas id="cv" width="160" height="100"></canvas>
+<div id="row"><label>Wind <input id="wd" type="range" min="-10" max="10" value="0"></label><label>Brush <input id="br" type="range" min="1" max="8" value="3"></label><select id="vw"><option>Normal</option><option>Heat</option><option>Pressure</option><option>Stress</option></select><button id="pz">Pause</button><button id="rs">Reset</button></div>
+<div id="inf"></div></main>
+<script>
+const W=160,H=100,N=W*H,DX=[1,-1,0,0],DY=[0,0,1,-1],rnd=Math.random,$=i=>document.getElementById(i);
+// name, rgb, kind(0 air,1 powder,2 liquid,3 gas,4 solid), density, weight, strength, heat conduction, heat weakening, wind response
+const M=[['Air',[14,16,26],0,0,0,0,.12,0,0],['Sand',[214,184,110],1,5,0,0,.15,0,.12],['Water',[54,120,220],2,3,0,0,.3,0,.08],['Stone',[122,122,130],4,9,3,160,.2,1500,0],['Wood',[130,86,48],4,9,1,40,.08,300,0],['Metal',[170,182,196],4,9,4,420,.6,900,0],['Oil',[92,64,30],2,2,0,0,.12,0,.08],['Gas',[150,220,140],3,-1,0,0,.1,0,1],['TNT',[190,40,40],1,5,0,0,.1,0,.1],['Fire',[255,140,20],3,-2,0,0,.3,0,1],['Steam',[210,220,232],3,-1,0,0,.1,0,1],['Rubble',[92,86,80],1,5,0,0,.15,0,.05]];
+const t=new Uint8Array(N),T=new Float32Array(N).fill(20),T2=new Float32Array(N),P=new Float32Array(N),P2=new Float32Array(N),L=new Int16Array(N),mk=new Uint32Array(N),WF=new Float32Array(N),WL=new Float32Array(N),SR=new Float32Array(N),ld=new Float32Array(N),par=new Int32Array(N),q=new Int32Array(N);
+const cv=$('cv'),ctx=cv.getContext('2d'),img=ctx.createImageData(W,H),wd=$('wd'),br=$('br'),vw=$('vw'),bar=$('bar'),inf=$('inf');
+let fr=0,paused=false,down=false,hx=-1,hy=-1;
+function mv(i,j){let a=t[i];t[i]=t[j];t[j]=a;a=T[i];T[i]=T[j];T[j]=a;a=L[i];L[i]=L[j];L[j]=a;mk[i]=mk[j]=fr}
+function ig(i,l){t[i]=9;L[i]=(l+rnd()*l)|0;T[i]=650}
+const sink=(a,b)=>{const kb=M[b][2];return kb==0||kb==3||(kb==2&&M[a][3]>M[b][3])};
+
+// HEAT: conduction by material, ambient loss, hot air convects upward
+function heat(){
+ for(let y=0;y<H;y++)for(let x=0;x<W;x++){const i=y*W+x,m=t[i];let s=0,c=0;
+  if(x>0){s+=T[i-1];c++}if(x<W-1){s+=T[i+1];c++}if(y>0){s+=T[i-W];c++}if(y<H-1){s+=T[i+W];c++}
+  let v=T[i]+(s/c-T[i])*M[m][6];const k=M[m][2];v+=(20-v)*(k==0||k==3?.006:.002);T2[i]=v}
+ T.set(T2);
+ for(let i=W;i<N;i++)if(!t[i]&&!t[i-W]&&T[i]>T[i-W]+2&&rnd()<.6){const a=T[i];T[i]=T[i-W];T[i-W]=a}
+}
+// AIR PRESSURE: hot gas builds pressure, solids seal it in, it equalizes and leaks out the sky
+function pressure(){
+ for(let y=0;y<H;y++)for(let x=0;x<W;x++){const i=y*W+x,k=M[t[i]][2];
+  if(k==4){P2[i]=0;continue}
+  let s=0,c=0;
+  if(x>0&&M[t[i-1]][2]<4){s+=P[i-1];c++}if(x<W-1&&M[t[i+1]][2]<4){s+=P[i+1];c++}
+  if(y>0&&M[t[i-W]][2]<4){s+=P[i-W];c++}if(y<H-1&&M[t[i+W]][2]<4){s+=P[i+W];c++}
+  let p=P[i];if(c)p+=(s/c-p)*.5;
+  if(k==0||k==3)p+=Math.max(0,T[i]-25)*.0006;
+  P2[i]=p*(y?.97:.8)}
+ P.set(P2)}
+// STRUCTURAL STRESS: load paths run to the ground; sideways hops multiply load; heat and pressure add or weaken
+function structure(){
+ SR.fill(0);par.fill(-2);let hd=0,tl=0;
+ for(let x=0;x<W;x++){const i=(H-1)*W+x;if(M[t[i]][2]==4){par[i]=-1;q[tl++]=i}}
+ while(hd<tl){const i=q[hd++],x=i%W,y=(i/W)|0;
+  for(let d=0;d<4;d++){const nx=x+DX[d],ny=y+DY[d];if(nx<0||ny<0||nx>=W||ny>=H)continue;const j=ny*W+nx;
+   if(par[j]==-2&&M[t[j]][2]==4){par[j]=i;q[tl++]=j}}}
+ for(let a=0;a<tl;a++){const i=q[a];ld[i]=M[t[i]][4]+WL[i]}
+ for(let a=tl-1;a>=0;a--){const i=q[a],p=par[i];if(p>=0)ld[p]+=ld[i]*(p-i==1||i-p==1?1.6:1)}
+ for(let a=0;a<tl;a++){const i=q[a],m=t[i],x=i%W,y=(i/W)|0;let pl=0;
+  for(let d=0;d<4;d++){const nx=x+DX[d],ny=y+DY[d];if(nx<0||ny<0||nx>=W||ny>=H)continue;const j=ny*W+nx;if(M[t[j]][2]<4)pl+=P[j]}
+  const s=M[m][5]*Math.max(.12,1-Math.max(0,T[i]-20)/M[m][7]);
+  SR[i]=(ld[i]+pl*20)/s;
+  if(SR[i]>1&&y<H-4&&rnd()<.3)t[i]=11}
+ // cut-off chunks fall as rigid bodies
+ for(let y=H-2;y>=0;y--)for(let x=0;x<W;x++){const i=y*W+x;
+  if(par[i]==-2&&M[t[i]][2]==4){const kb=M[t[i+W]][2];if(kb!=4&&kb!=1)mv(i,i+W)}}
+}
+function step(){
+ fr++;const w=wd.value/10;WL.fill(0);
+ // WIND: air speed along each row, blocked by solids (wind shadow), pushes on exposed faces
+ for(let y=0;y<H;y++){let v=w;const d=w<0?-1:1;for(let x=d>0?0:W-1;x>=0&&x<W;x+=d){const i=y*W+x;
+  if(M[t[i]][2]==4){WL[i]=Math.abs(v)*4;v*=.15}else{WF[i]=v;v+=(w-v)*.12}}}
+ heat();pressure();
+ const dr=fr&1;
+ for(let y=H-1;y>=0;y--)for(let s=0;s<W;s++){
+  const x=dr?W-1-s:s,i=y*W+x;let m=t[i];if(!m||mk[i]==fr)continue;const r=rnd();
+  if(m==2){if(T[i]>100){t[i]=m=10;T[i]=104;P[i]+=3}}
+  else if(m==10){if(T[i]<92&&r<.06)t[i]=m=2}
+  else if(m==6){if(T[i]>170&&r<.3){ig(i,16);m=9}}
+  else if(m==7){if(T[i]>130&&r<.5){ig(i,8);P[i]+=4;m=9}}
+  else if(m==8){if(T[i]>140){ig(i,20);P[i]+=90;T[i]=1000;m=9}}
+  else if(m==4){if(T[i]>260&&r<.04){ig(i,12);m=9}}
+  // FIRE: burns out, heats and ignites neighbours, drowns in water
+  if(m==9){
+   if((L[i]-=2)<=0||(y==0&&r<.3)){t[i]=0;continue}
+   if(T[i]<650)T[i]=650;
+   const d=(rnd()*4)|0,nx=x+DX[d],ny=y+DY[d];
+   if(nx>=0&&ny>=0&&nx<W&&ny<H){const n=ny*W+nx,c=t[n];
+    if(c==2){t[i]=10;T[i]=105;P[i]+=1;continue}
+    if((c==4||c==6||c==7||c==8)&&rnd()<.3)T[n]+=150}
+  }
+  const k=M[m][2];if(k<1||k>3)continue;
+  // forces: wind (light stuff catches more of it) and pressure gradients
+  let fx=WF[i]*M[m][8]*.5,fy=0;
+  if(x>0&&x<W-1)fx+=(P[i-1]-P[i+1])*.06;
+  if(y>0&&y<H-1)fy=(P[i+W]-P[i-W])*.06;
+  if(Math.abs(fx)>rnd()){const j=i+(fx>0?1:-1);if((fx>0?x<W-1:x>0)&&!t[j]){mv(i,j);continue}}
+  if(Math.abs(fy)>rnd()){const j=i+(fy>0?-W:W);if(j>=0&&j<N&&!t[j]){mv(i,j);continue}}
+  if(k==3){
+   if(y==0){if(r<.05)t[i]=0;continue}
+   const u=i-W,ku=M[t[u]][2];
+   if((ku==0||(ku==2&&m!=9))&&rnd()<(m==9?.6:.8)){mv(i,u);continue}
+   const d=rnd()<.5?-1:1,nx=x+d;if(nx>=0&&nx<W&&!t[i+d]&&rnd()<.6)mv(i,i+d);
+  }else if(y<H-1){
+   const b=i+W;if(sink(m,t[b])){mv(i,b);continue}
+   const d=rnd()<.5?-1:1,nx=x+d;
+   if(nx>=0&&nx<W){const ks=M[t[i+d]][2];
+    if(sink(m,t[b+d])&&ks!=4){mv(i,b+d);continue}
+    if(k==2&&(ks==0||ks==3))mv(i,i+d)}
+  }
+ }
+ structure();
+}
+function reset(){
+ t.fill(0);T.fill(20);P.fill(0);L.fill(0);
+ const R=(a,b,c,d,m)=>{for(let y=b;y<=d;y++)for(let x=a;x<=c;x++)t[y*W+x]=m};
+ R(0,H-4,W-1,H-1,3);R(18,H-34,22,H-5,3);
+ R(60,H-16,72,H-15,4);R(60,H-14,61,H-5,4);R(71,H-14,72,H-5,4);
+ R(125,H-16,138,H-5,5);R(127,H-14,136,H-7,0);
+}
+const tools=[1,2,3,4,5,6,7,8,9].map(m=>({n:M[m][0],m})).concat([{n:'Heat',m:'h'},{n:'Chill',m:'c'},{n:'Erase',m:'e'}]);
+let tool=tools[0];
+tools.forEach((o,n)=>{const b=document.createElement('button');b.textContent=o.n;
+ if(typeof o.m=='number')b.style.borderBottom='4px solid rgb('+M[o.m][1]+')';
+ if(!n)b.className='on';
+ b.onclick=()=>{tool=o;[...bar.children].forEach(x=>x.classList.toggle('on',x==b))};bar.append(b)});
+const pos=e=>{const r=cv.getBoundingClientRect();hx=Math.floor((e.clientX-r.left)/r.width*W);hy=Math.floor((e.clientY-r.top)/r.height*H)};
+cv.onpointerdown=e=>{down=true;cv.setPointerCapture(e.pointerId);pos(e)};
+cv.onpointermove=pos;cv.onpointerup=cv.onpointercancel=()=>down=false;
+cv.onpointerout=()=>{if(!down)hx=-1};
+$('pz').onclick=e=>{paused=!paused;e.target.textContent=paused?'Play':'Pause'};$('rs').onclick=reset;
+function paint(){
+ const R=+br.value,m=tool.m;
+ for(let dy=-R;dy<=R;dy++)for(let dx=-R;dx<=R;dx++){
+  if(dx*dx+dy*dy>R*R)continue;const x=hx+dx,y=hy+dy;if(x<0||y<0||x>=W||y>=H)continue;const i=y*W+x;
+  if(m=='h')T[i]=Math.min(1500,T[i]+60);
+  else if(m=='c')T[i]=Math.max(-80,T[i]-60);
+  else if(m=='e'){t[i]=0;T[i]=20;P[i]=0}
+  else if(!t[i]&&(M[m][2]==4||rnd()<.4)){if(m==9)ig(i,14);else t[i]=m}}
+}
+function draw(){
+ const d=img.data,view=vw.selectedIndex;
+ for(let i=0;i<N;i++){
+  const m=t[i],c=M[m][1],k=T[i],o=i*4;let r=c[0],g=c[1],b=c[2];
+  if(view==1){r=Math.min(255,Math.max(0,(k-20)*.9));g=Math.min(255,Math.max(0,(k-300)*.9));b=Math.min(255,Math.max(0,(20-k)*4))+(m?30:15)}
+  else if(view==2){const v=Math.min(1,Math.max(0,P[i]/12));if(M[m][2]==4)r=g=b=60;else{r=30+225*v;g=40+90*v;b=90-40*v}}
+  else if(view==3){if(M[m][2]==4){const s=Math.min(1,SR[i]);r=60+195*s;g=210-180*s;b=70}else r=g=b=20}
+  else if(m==9){r=255;g=90+rnd()*110;b=20}
+  else{
+   let gl=Math.max(0,Math.min(1,(k-(m?200:60))/500));if(!m)gl*=.5;
+   r+=(255-r)*gl;g+=(110-g)*gl*.7;b*=1-gl*.8;
+   if(k<5){const f=Math.min(1,(5-k)/60);b+=(255-b)*f*.6;g+=(255-g)*f*.3}
+   if(m){const n=((i*7919)%11)-5;r+=n;g+=n;b+=n}}
+  d[o]=r;d[o+1]=g;d[o+2]=b;d[o+3]=255}
+ ctx.putImageData(img,0,0);
+}
+function loop(){
+ if(down&&hx>=0)paint();if(!paused)step();draw();
+ if(hx>=0&&hy>=0&&hx<W&&hy<H){const i=hy*W+hx;inf.textContent=M[t[i]][0]+' | '+(T[i]|0)+'°C | pressure '+P[i].toFixed(1)+' | stress '+((SR[i]*100)|0)+'%'}
+ else inf.textContent='Paint on the grid. Heat plus wood makes fire. Seal a box and heat it for pressure. Build long or tall for stress.';
+ requestAnimationFrame(loop)}
+reset();loop();
+</script></body></html>
