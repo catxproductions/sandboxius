@@ -24,7 +24,7 @@ input{accent-color:var(--ac);width:90px}
 <script>
 const W=160,H=100,N=W*H,DX=[1,-1,0,0],DY=[0,0,1,-1],rnd=Math.random,$=i=>document.getElementById(i);
 // name, rgb, kind(0 air,1 powder,2 liquid,3 gas,4 solid), density, weight, strength, heat conduction, heat weakening, wind response
-const M=[['Air',[14,16,26],0,0,0,0,.12,0,0],['Sand',[214,184,110],1,5,0,0,.15,0,.12],['Water',[54,120,220],2,3,0,0,.3,0,.08],['Stone',[122,122,130],4,9,3,160,.2,1500,0],['Wood',[130,86,48],4,9,1,40,.08,300,0],['Metal',[170,182,196],4,9,4,420,.6,900,0],['Oil',[92,64,30],2,2,0,0,.12,0,.08],['Gas',[150,220,140],3,-1,0,0,.1,0,1],['TNT',[190,40,40],1,5,0,0,.1,0,.1],['Fire',[255,140,20],3,-2,0,0,.3,0,1],['Steam',[210,220,232],3,-1,0,0,.1,0,1],['Rubble',[92,86,80],1,5,0,0,.15,0,.05]];
+const M=[['Air',[14,16,26],0,0,0,0,.12,0,0],['Sand',[214,184,110],1,5,0,0,.15,0,.12],['Water',[54,120,220],2,3,0,0,.3,0,.08],['Stone',[122,122,130],4,9,3,160,.2,1500,0],['Wood',[130,86,48],4,9,1,40,.0,0,0],['Steel',[180,180,190],4,12,4,400,.1,2000,0],['Coal',[60,60,60],4,7,2,20,.15,800,0],['Gunpowder',[80,80,100],4,8,1,10,.08,200,0],['TNT',[180,80,80],4,9,1,5,.05,150,0],['Fire',[220,100,0],3,0,0,0,.9,0,0],['Steam',[200,200,220],3,0,0,0,.3,0,0],['Rubble',[100,100,100],1,3,0,0,.1,0,.2]];
 const t=new Uint8Array(N),T=new Float32Array(N).fill(20),T2=new Float32Array(N),P=new Float32Array(N),P2=new Float32Array(N),L=new Int16Array(N),mk=new Uint32Array(N),WF=new Float32Array(N),WL=new Float32Array(N),SR=new Float32Array(N),ld=new Float32Array(N),par=new Int32Array(N),q=new Int32Array(N);
 const cv=$('cv'),ctx=cv.getContext('2d'),img=ctx.createImageData(W,H),wd=$('wd'),br=$('br'),vw=$('vw'),bar=$('bar'),inf=$('inf');
 let fr=0,paused=false,down=false,hx=-1,hy=-1;
@@ -51,24 +51,61 @@ function pressure(){
   if(k==0||k==3)p+=Math.max(0,T[i]-25)*.0006;
   P2[i]=p*(y?.97:.8)}
  P.set(P2)}
-// STRUCTURAL STRESS: load paths run to the ground; sideways hops multiply load; heat and pressure add or weaken
+
+// STRUCTURAL STRESS: improved load distribution with lateral support and buckling
 function structure(){
  SR.fill(0);par.fill(-2);let hd=0,tl=0;
+ // Find ground solids and start load path traversal
  for(let x=0;x<W;x++){const i=(H-1)*W+x;if(M[t[i]][2]==4){par[i]=-1;q[tl++]=i}}
+ // BFS from ground: find all connected solids
  while(hd<tl){const i=q[hd++],x=i%W,y=(i/W)|0;
   for(let d=0;d<4;d++){const nx=x+DX[d],ny=y+DY[d];if(nx<0||ny<0||nx>=W||ny>=H)continue;const j=ny*W+nx;
    if(par[j]==-2&&M[t[j]][2]==4){par[j]=i;q[tl++]=j}}}
+ 
+ // Calculate material load (weight)
  for(let a=0;a<tl;a++){const i=q[a];ld[i]=M[t[i]][4]+WL[i]}
- for(let a=tl-1;a>=0;a--){const i=q[a],p=par[i];if(p>=0)ld[p]+=ld[i]*(p-i==1||i-p==1?1.6:1)}
+ 
+ // Propagate load upward with directional multipliers
+ for(let a=tl-1;a>=0;a--){const i=q[a],p=par[i];if(p>=0){
+  const x=i%W,px=p%W;
+  // Sideways support (lateral bracing): higher load multiplier
+  const lateralBonus=(px!=x)?1.6:1;
+  ld[p]+=ld[i]*lateralBonus;
+ }}
+ 
+ // Lateral stress distribution: solids share load with horizontal neighbors
+ // This makes wide bases stronger and allows arches/buttresses to distribute load
+ for(let a=0;a<tl;a++){const i=q[a];
+  const y=(i/W)|0,x=i%W;
+  if(ld[i]>1){
+   // Try to spread 15% of load to adjacent solids (lateral bracing effect)
+   for(let d of [-1,1]){const nx=x+d;if(nx<0||nx>=W)continue;
+    const j=y*W+nx;if(par[j]!==-2&&M[t[j]][2]==4){
+     const share=ld[i]*0.15;ld[i]-=share;ld[j]+=share*.8;
+    }}}}
+ 
+ // Calculate stress per material
  for(let a=0;a<tl;a++){const i=q[a],m=t[i],x=i%W,y=(i/W)|0;let pl=0;
   for(let d=0;d<4;d++){const nx=x+DX[d],ny=y+DY[d];if(nx<0||ny<0||nx>=W||ny>=H)continue;const j=ny*W+nx;if(M[t[j]][2]<4)pl+=P[j]}
+  
+  // Base strength reduced by temperature (heat weakening)
   const s=M[m][5]*Math.max(.12,1-Math.max(0,T[i]-20)/M[m][7]);
+  
+  // Stress = (axial load + pressure) / strength
   SR[i]=(ld[i]+pl*20)/s;
-  if(SR[i]>1&&y<H-4&&rnd()<.3)t[i]=11}
- // cut-off chunks fall as rigid bodies
+  
+  // Buckling effect: tall structures under compression fail more easily
+  // Increases stress based on aspect ratio of load path
+  const heightFactor=Math.max(1,1+Math.pow(Math.max(0,y/60-ld[i]*0.0005),2)*0.08);
+  
+  // Failure: when stress exceeds strength * buckling factor
+  if(SR[i]*heightFactor>1&&y<H-4&&rnd()<.3)t[i]=11}
+ 
+ // Detached solids fall as rigid bodies
  for(let y=H-2;y>=0;y--)for(let x=0;x<W;x++){const i=y*W+x;
   if(par[i]==-2&&M[t[i]][2]==4){const kb=M[t[i+W]][2];if(kb!=4&&kb!=1)mv(i,i+W)}}
 }
+
 function step(){
  fr++;const w=wd.value/10;WL.fill(0);
  // WIND: air speed along each row, blocked by solids (wind shadow), pushes on exposed faces
@@ -111,8 +148,8 @@ function step(){
    if(nx>=0&&nx<W){const ks=M[t[i+d]][2];
     if(sink(m,t[b+d])&&ks!=4){mv(i,b+d);continue}
     if(k==2&&(ks==0||ks==3))mv(i,i+d)}
+   }
   }
- }
  structure();
 }
 function reset(){
