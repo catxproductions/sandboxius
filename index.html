@@ -69,12 +69,15 @@
     <canvas id="cv" width="160" height="100"></canvas>
     <div id="row">
       <label>Wind <input id="wd" type="range" min="-10" max="10" value="0"></label>
+      <label>Gravity X <input id="gx" type="range" min="-2" max="2" value="0" step="0.1"></label>
+      <label>Gravity Y <input id="gy" type="range" min="-2" max="2" value="1" step="0.1"></label>
       <label>Brush <input id="br" type="range" min="0" max="8" value="3"></label>
       <select id="vw">
         <option>Normal</option>
         <option>Heat</option>
         <option>Pressure</option>
         <option>Stress</option>
+        <option>Velocity</option>
       </select>
       <button id="pz">Pause</button>
       <button id="rs">Reset</button>
@@ -110,9 +113,13 @@
     const P = new Float32Array(N), P2 = new Float32Array(N), L = new Int16Array(N), mk = new Uint32Array(N);
     const WF = new Float32Array(N), WL = new Float32Array(N), SR = new Float32Array(N), ld = new Float32Array(N);
     const par = new Int32Array(N), q = new Int32Array(N);
+    
+    // Velocity arrays for directional gravity and kinetic energy
+    const VX = new Float32Array(N), VY = new Float32Array(N);
+    const KE = new Float32Array(N); // Kinetic energy for impact calculations
 
     const cv = $('cv'), ctx = cv.getContext('2d'), img = ctx.createImageData(W, H);
-    const wd = $('wd'), br = $('br'), vw = $('vw'), bar = $('bar'), inf = $('inf');
+    const wd = $('wd'), gx = $('gx'), gy = $('gy'), br = $('br'), vw = $('vw'), bar = $('bar'), inf = $('inf');
 
     let fr = 0, paused = false, down = false, hx = -1, hy = -1;
 
@@ -120,6 +127,8 @@
       let a = t[i]; t[i] = t[j]; t[j] = a;
       a = T[i]; T[i] = T[j]; T[j] = a;
       a = L[i]; L[i] = L[j]; L[j] = a;
+      a = VX[i]; VX[i] = VX[j]; VX[j] = a;
+      a = VY[i]; VY[i] = VY[j]; VY[j] = a;
       mk[i] = mk[j] = fr;
     }
 
@@ -172,6 +181,48 @@
         }
       }
       P.set(P2);
+    }
+
+    function applyGravity() {
+      const gravX = parseFloat(gx.value);
+      const gravY = parseFloat(gy.value);
+
+      for (let i = 0; i < N; i++) {
+        const m = t[i];
+        if (!m) continue;
+
+        const k = M[m][2];
+        if (k === 4) continue; // Solids don't fall directly
+
+        // Apply gravity acceleration
+        VX[i] += gravX * 0.02;
+        VY[i] += gravY * 0.02;
+
+        // Air friction for gases
+        if (k === 3) {
+          VX[i] *= 0.85;
+          VY[i] *= 0.85;
+        } else if (k === 2) {
+          // Liquid friction
+          VX[i] *= 0.92;
+          VY[i] *= 0.92;
+        } else {
+          // Powder friction
+          VX[i] *= 0.88;
+          VY[i] *= 0.88;
+        }
+
+        // Cap velocity
+        const vMag = Math.sqrt(VX[i] * VX[i] + VY[i] * VY[i]);
+        if (vMag > 3) {
+          VX[i] = (VX[i] / vMag) * 3;
+          VY[i] = (VY[i] / vMag) * 3;
+        }
+
+        // Calculate kinetic energy: KE = 0.5 * mass * velocity²
+        const mass = M[m][3];
+        KE[i] = 0.5 * mass * vMag * vMag;
+      }
     }
 
     function structure() {
@@ -266,7 +317,96 @@
         }
 
         stress += Math.abs(WF[i]) * M[m][8] * 0.3;
-        SR[i] = Math.min(1.5, stress * 0.25);
+        
+        // Add kinetic energy-based stress (impact force)
+        stress += KE[i] * 0.15;
+        
+        SR[i] = Math.min(2.0, stress * 0.25);
+      }
+    }
+
+    function moveWithVelocity() {
+      for (let y = H - 1; y >= 0; y--) {
+        for (let x = 0; x < W; x++) {
+          const i = y * W + x;
+          const m = t[i];
+          if (!m || mk[i] === fr) continue;
+
+          const k = M[m][2];
+          if (k === 4 || k === 0) continue; // Solids and air don't move with velocity
+
+          // Determine movement direction based on velocity
+          const vx = VX[i];
+          const vy = VY[i];
+          const vMag = Math.sqrt(vx * vx + vy * vy);
+
+          if (vMag < 0.1) continue;
+
+          // Try to move in primary velocity direction
+          let moved = false;
+
+          // Vertical component (primary)
+          if (Math.abs(vy) > 0.5 && y < H - 1) {
+            const moveDir = vy > 0 ? 1 : -1;
+            const ny = y + moveDir;
+            const j = ny * W + x;
+            if (ny >= 0 && ny < H) {
+              const target = t[j];
+              if (!target || (k === 2 && M[target][3] < M[m][3])) {
+                mv(i, j);
+                moved = true;
+                // Transfer some velocity to target
+                if (VY[j] * moveDir < vy * moveDir) {
+                  VY[j] = vy * 0.7;
+                }
+                // Impact stress on collision
+                if (target && M[target][2] === 4) {
+                  P[j] += Math.abs(vy) * M[m][3] * 0.5;
+                }
+                continue;
+              }
+            }
+          }
+
+          // Horizontal component (secondary)
+          if (!moved && Math.abs(vx) > 0.5 && x >= 0 && x < W - 1) {
+            const moveDir = vx > 0 ? 1 : -1;
+            const nx = x + moveDir;
+            const j = y * W + nx;
+            if (nx >= 0 && nx < W) {
+              const target = t[j];
+              if (!target || (k === 2 && M[target][3] < M[m][3])) {
+                mv(i, j);
+                moved = true;
+                if (VX[j] * moveDir < vx * moveDir) {
+                  VX[j] = vx * 0.7;
+                }
+                if (target && M[target][2] === 4) {
+                  P[j] += Math.abs(vx) * M[m][3] * 0.5;
+                }
+                continue;
+              }
+            }
+          }
+
+          // Try diagonal if velocity is balanced
+          if (!moved && Math.abs(vx) > 0.3 && Math.abs(vy) > 0.3) {
+            const moveX = vx > 0 ? 1 : -1;
+            const moveY = vy > 0 ? 1 : -1;
+            const nx = x + moveX;
+            const ny = y + moveY;
+            if (nx >= 0 && nx < W && ny >= 0 && ny < H) {
+              const j = ny * W + nx;
+              const target = t[j];
+              if (!target || (k === 2 && M[target][3] < M[m][3])) {
+                mv(i, j);
+                if (target && M[target][2] === 4) {
+                  P[j] += vMag * M[m][3] * 0.4;
+                }
+              }
+            }
+          }
+        }
       }
     }
 
@@ -289,6 +429,7 @@
 
       heat();
       pressure();
+      applyGravity();
 
       const dr = fr & 1;
       for (let y = H - 1; y >= 0; y--) {
@@ -358,12 +499,14 @@
         }
       }
 
+      moveWithVelocity();
       structure();
       calculateNonsolidStress();
     }
 
     function reset() {
       t.fill(0); T.fill(20); P.fill(0); L.fill(0);
+      VX.fill(0); VY.fill(0); KE.fill(0);
       const R = (a, b, c, d, m) => {
         for (let y = b; y <= d; y++) {
           for (let x = a; x <= c; x++) t[y * W + x] = m;
@@ -421,7 +564,7 @@
         if (i < 0 || i >= N) return;
         if (m === 'h') T[i] = Math.min(1500, T[i] + 60);
         else if (m === 'c') T[i] = Math.max(-80, T[i] - 60);
-        else if (m === 'e') { t[i] = 0; T[i] = 20; P[i] = 0; }
+        else if (m === 'e') { t[i] = 0; T[i] = 20; P[i] = 0; VX[i] = 0; VY[i] = 0; }
         else if (!t[i] && (M[m][2] === 4 || rnd() < .4)) {
           if (m === 9) ig(i, 14); else t[i] = m;
         }
@@ -436,7 +579,7 @@
           const i = y * W + x;
           if (m === 'h') T[i] = Math.min(1500, T[i] + 60);
           else if (m === 'c') T[i] = Math.max(-80, T[i] - 60);
-          else if (m === 'e') { t[i] = 0; T[i] = 20; P[i] = 0; }
+          else if (m === 'e') { t[i] = 0; T[i] = 20; P[i] = 0; VX[i] = 0; VY[i] = 0; }
           else if (!t[i] && (M[m][2] === 4 || rnd() < .4)) {
             if (m === 9) ig(i, 14); else t[i] = m;
           }
@@ -450,6 +593,27 @@
       const g = 50 + 170 * (1 - v) + 30 * v;
       const b = 90 - 40 * v;
       return [r, g, b];
+    }
+
+    function velocityColor(vx, vy) {
+      const mag = Math.sqrt(vx * vx + vy * vy);
+      const angle = Math.atan2(vy, vx);
+      const hue = ((angle + Math.PI) / (2 * Math.PI)) * 360;
+      const sat = Math.min(100, mag * 20);
+      const light = 50;
+      const c = new Uint8ClampedArray(3);
+      const h = hue / 60;
+      const s = sat / 100;
+      const l = light / 100;
+      const a = s * Math.min(l, 1 - l);
+      const f = (n) => {
+        const k = (n + h) % 6;
+        return l - a * Math.max(-1, Math.min(k - 3, Math.min(5 - k, 1)));
+      };
+      c[0] = f(5) * 255;
+      c[1] = f(3) * 255;
+      c[2] = f(1) * 255;
+      return [c[0], c[1], c[2]];
     }
 
     function draw() {
@@ -475,6 +639,10 @@
             const col = stressColor(s);
             r = col[0]; g = col[1]; b = col[2];
           }
+        } else if (view === 4) {
+          // Velocity visualization
+          const col = velocityColor(VX[i], VY[i]);
+          r = col[0]; g = col[1]; b = col[2];
         } else if (m === 9) {
           r = 255; g = 90 + rnd() * 110; b = 20;
         } else {
@@ -507,9 +675,10 @@
       if (hx >= 0 && hy >= 0 && hx < W && hy < H) {
         const i = hy * W + hx;
         const name = M[t[i]][0];
-        inf.textContent = name + ' | ' + (T[i] | 0) + '°C | pressure ' + P[i].toFixed(1) + ' | stress ' + ((SR[i] * 100) | 0) + '%';
+        const vMag = Math.sqrt(VX[i] * VX[i] + VY[i] * VY[i]).toFixed(2);
+        inf.textContent = name + ' | ' + (T[i] | 0) + '°C | pressure ' + P[i].toFixed(1) + ' | vel ' + vMag + ' | stress ' + ((SR[i] * 100) | 0) + '%';
       } else {
-        inf.textContent = 'Paint on the grid. Heat + wood makes fire. Seal boxes and heat them for pressure. Stress now affects all materials.';
+        inf.textContent = 'Gravity X/Y adjust directional gravity. Velocity impacts create realistic collisions. Heavier + faster = more stress on impact.';
       }
 
       requestAnimationFrame(loop);
