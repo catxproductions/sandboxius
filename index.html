@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Sandboxius</title>
+  <style>
+    :root {
+      --bg: #e3e9f0;
+      --fg: #16202b;
+      --pn: #cfd8e3;
+      --ac: #0f766e;
+      --soft: rgba(255,255,255,.18);
+      box-sizing: border-box;
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #0f1620;
+        --fg: #dbe6f2;
+        --pn: #1c2733;
+        --ac: #2dd4bf;
+        --soft: rgba(255,255,255,.04);
+      }
+    }
+    :root[data-theme="dark"] {
+      --bg: #0f1620;
+      --fg: #dbe6f2;
+      --pn: #1c2733;
+      --ac: #2dd4bf;
+      --soft: rgba(255,255,255,.04);
+    }
+    html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font: 13px/1.35 ui-monospace, Menlo, Consolas, monospace;
+      display: flex; justify-content: center; padding: 10px;
+    }
+    main {
+      width: 100%; max-width: 960px; display: flex; flex-direction: column; gap: 8px;
+    }
+    h1 { margin: 0; font-size: 22px; }
+    #bar, #row {
+      display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    }
+    button, select {
+      font: inherit; color: var(--fg); background: var(--pn); border: 1px solid var(--fg);
+      padding: 5px 9px; cursor: pointer;
+    }
+    button.on {
+      outline: 2px solid var(--ac); outline-offset: 1px;
+    }
+    canvas {
+      width: 100%; aspect-ratio: 8 / 5; image-rendering: pixelated; touch-action: none;
+      background: #0e101a; border: 2px solid var(--fg); cursor: crosshair;
+    }
+    input { accent-color: var(--ac); width: 90px; }
+    #inf {
+      min-height: 1.4em; color: color-mix(in srgb, var(--fg) 82%, var(--ac));
+    }
+    .tiny { opacity: .8; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Sandboxius</h1>
+    <div id="bar"></div>
+    <canvas id="cv" width="160" height="100"></canvas>
+    <div id="row">
+      <label>Wind <input id="wd" type="range" min="-10" max="10" value="0"></label>
+      <label>Gravity X <input id="gx" type="range" min="-2" max="2" value="0" step="0.1"></label>
+      <label>Gravity Y <input id="gy" type="range" min="-2" max="2" value="1" step="0.1"></label>
+      <label>Brush <input id="br" type="range" min="0" max="8" value="3"></label>
+      <select id="vw">
+        <option>Normal</option>
+        <option>Heat</option>
+        <option>Pressure</option>
+        <option>Stress</option>
+        <option>Velocity</option>
+      </select>
+      <button id="pz">Pause</button>
+      <button id="rs">Reset</button>
+    </div>
+    <div id="inf"></div>
+  </main>
+
+  <script>
+    const W = 160, H = 100, N = W * H, DX = [1, -1, 0, 0], DY = [0, 0, 1, -1], rnd = Math.random, $ = i => document.getElementById(i);
+
+    // name, rgb, kind(0=air,1=powder,2=liquid,3=gas,4=solid), density, weight, strength, heat conduction, heat weakening, wind response
+    const M = [
+      ['Air', [14, 16, 26], 0, 0, 0, 0, .12, 0, 0],
+      ['Sand', [214, 184, 110], 1, 5, 0, 0, .15, 0, .12],
+      ['Water', [54, 120, 220], 2, 3, 0, 0, .3, 0, .08],
+      ['Stone', [122, 122, 130], 4, 9, 3, 320, .2, 1500, 0],
+      ['Wood', [130, 86, 48], 4, 9, 1, 40, .06, 300, 0],
+      ['Steel', [180, 180, 190], 4, 12, 4, 1200, .1, 2000, 0],
+      ['Coal', [60, 60, 60], 4, 7, 2, 60, .15, 800, 0],
+      ['Gunpowder', [80, 80, 100], 1, 5, 0, 0, .08, 0, .1],
+      ['TNT', [180, 80, 80], 4, 9, 1, 40, .05, 150, 0],
+      ['Fire', [220, 100, 0], 3, 0, 0, 0, .9, 0, 1],
+      ['Steam', [200, 200, 220], 3, 0, 0, 0, .3, 0, .6],
+      ['Smoke', [120, 120, 120], 3, 0, 0, 0, .3, 0, .7],
+      ['Ash', [90, 90, 90], 1, 0, 0, 0, .2, 0, .15],
+      ['Rubble', [100, 100, 100], 1, 3, 0, 0, .18, 0, .1],
+      ['Dirt', [104, 74, 44], 1, 4, 0, 0, .2, 0, .1],
+      ['Ice', [170, 220, 255], 4, 8, 0, 50, .06, 0, 0],
+      ['Lava', [255, 90, 20], 2, 6, 0, 0, .4, 0, 0]
+    ];
+
+    const t = new Uint8Array(N), T = new Float32Array(N).fill(20), T2 = new Float32Array(N);
+    const P = new Float32Array(N), P2 = new Float32Array(N), L = new Int16Array(N), mk = new Uint32Array(N);
+    const WF = new Float32Array(N), WL = new Float32Array(N), SR = new Float32Array(N), ld = new Float32Array(N);
+    const par = new Int32Array(N), q = new Int32Array(N);
+    
+    // Velocity arrays for directional gravity and kinetic energy
+    const VX = new Float32Array(N), VY = new Float32Array(N);
+    const KE = new Float32Array(N); // Kinetic energy for impact calculations
+    const SX = new Float32Array(N), SY = new Float32Array(N); // directional stress vectors
+    const WA = new Float32Array(N); // loose material stacked above each cell
+    const DMG = new Float32Array(N), FS = new Uint8Array(N), dep = new Int16Array(N); // impact damage, cells fallen in a row, BFS depth
+    let GX = 0, GY = 1, GM = 1, ADX = 0, ADY = 1; // gravity vector, magnitude, floor direction
+    const inb = (x, y) => x >= 0 && y >= 0 && x < W && y < H;
+
+    const cv = $('cv'), ctx = cv.getContext('2d'), img = ctx.createImageData(W, H);
+    const wd = $('wd'), gx = $('gx'), gy = $('gy'), br = $('br'), vw = $('vw'), bar = $('bar'), inf = $('inf');
+
+    let fr = 0, paused = false, down = false, hx = -1, hy = -1;
+
+    function mv(i, j) {
+      let a = t[i]; t[i] = t[j]; t[j] = a;
+      a = T[i]; T[i] = T[j]; T[j] = a;
+      a = L[i]; L[i] = L[j]; L[j] = a;
+      a = VX[i]; VX[i] = VX[j]; VX[j] = a;
+      a = VY[i]; VY[i] = VY[j]; VY[j] = a;
+      a = SX[i]; SX[i] = SX[j]; SX[j] = a;
+      a = SY[i]; SY[i] = SY[j]; SY[j] = a;
+      a = DMG[i]; DMG[i] = DMG[j]; DMG[j] = a;
+      FS[i] = FS[j] = 0; // any move restarts the fall count; fall branches set it again
+      const dx = (j % W) - (i % W), dy = ((j / W) | 0) - ((i / W) | 0);
+      VX[j] += (dx - VX[j]) * .6; VY[j] += (dy - VY[j]) * .6;
+      if (t[i]) { VX[i] += (-dx - VX[i]) * .6; VY[i] += (-dy - VY[i]) * .6; } else { VX[i] = VY[i] = 0; }
+      mk[i] = mk[j] = fr;
+    }
+
+    function ig(i, l) {
+      t[i] = 9; L[i] = (l + rnd() * l) | 0; T[i] = 650;
+    }
+
+    const sink = (a, b) => {
+      const kb = M[b][2];
+      return kb === 0 || kb === 3 || (kb === 2 && M[a][3] > M[b][3]);
+    };
+
+    function heat() {
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const i = y * W + x, m = t[i];
+          const ka = M[m][6], Ti = T[i];
+          let v = Ti;
+          for (let d = 0; d < 4; d++) {
+            const nx = x + DX[d], ny = y + DY[d];
+            if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+            const j = ny * W + nx, kb = M[t[j]][6];
+            v += (T[j] - Ti) * ka * kb / (ka + kb) * .5; // same flux both ways
+          }
+          const k = M[m][2];
+          v += (20 - v) * (k === 0 || k === 3 ? .006 : .002);
+          T2[i] = v;
+        }
+      }
+      T.set(T2);
+      if (ADX | ADY) {
+        for (let y = 0; y < H; y++) {
+          for (let x = 0; x < W; x++) {
+            const ux = x - ADX, uy = y - ADY;
+            if (!inb(ux, uy)) continue;
+            const i = y * W + x, u = uy * W + ux;
+            if (!t[i] && !t[u] && T[i] > T[u] + 2 && rnd() < .6 * Math.min(1, GM)) {
+              const a = T[i]; T[i] = T[u]; T[u] = a; // hot air rises against gravity
+            }
+          }
+        }
+      }
+    }
+
+    function pressure() {
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const i = y * W + x, k = M[t[i]][2];
+          if (k === 4) { P2[i] = 0; continue; }
+          let s = 0, c = 0;
+          if (x > 0 && M[t[i - 1]][2] < 4) { s += P[i - 1]; c++; }
+          if (x < W - 1 && M[t[i + 1]][2] < 4) { s += P[i + 1]; c++; }
+          if (y > 0 && M[t[i - W]][2] < 4) { s += P[i - W]; c++; }
+          if (y < H - 1 && M[t[i + W]][2] < 4) { s += P[i + W]; c++; }
+          let p = P[i];
+          if (c) p += (s / c - p) * .5;
+          if (k === 0 || k === 3) p += Math.max(0, T[i] - 25) * .0006;
+          P2[i] = p * (y ? .97 : .8);
+        }
+      }
+      P.set(P2);
+    }
+
+    function applyGravity() {
+      const gravX = parseFloat(gx.value);
+      const gravY = parseFloat(gy.value);
+
+      for (let i = 0; i < N; i++) {
+        const m = t[i];
+        if (!m) continue;
+
+        const k = M[m][2];
+        if (k === 4) continue; // Solids don't fall directly
+
+        // Apply gravity acceleration
+        const gs = k === 3 ? -.5 : 1;
+        VX[i] += gravX * 0.02 * gs;
+        VY[i] += gravY * 0.02 * gs;
+
+        // Air friction for gases
+        if (k === 3) {
+          VX[i] *= 0.85;
+          VY[i] *= 0.85;
+        } else if (k === 2) {
+          // Liquid friction
+          VX[i] *= 0.92;
+          VY[i] *= 0.92;
+        } else {
+          // Powder friction
+          VX[i] *= 0.88;
+          VY[i] *= 0.88;
+        }
+
+        // Cap velocity
+        const vMag = Math.sqrt(VX[i] * VX[i] + VY[i] * VY[i]);
+        if (vMag > 3) {
+          VX[i] = (VX[i] / vMag) * 3;
+          VY[i] = (VY[i] / vMag) * 3;
+        }
+
+        // Calculate kinetic energy: KE = 0.5 * mass * velocity²
+        const mass = M[m][3];
+        KE[i] = 0.5 * mass * vMag * vMag;
+      }
+    }
+
+    // landing energy = 1/2 · weight · v², v² = 2·g·(cells fallen). Adds a shock load now and lasting damage.
+    function impact(j, m, fs, src) {
+      const v2 = 2 * GM * Math.min(fs, 40); // air drag caps fall speed
+      const e = .5 * M[m][3] * v2 * (M[m][2] === 4 ? 3 : 1); // a rigid chunk outweighs one grain
+      WL[j] += e * .15;
+      const S = M[t[j]][5];
+      if (S) DMG[j] += e * .05 / S;
+      if (src !== undefined && M[m][5]) DMG[src] += e * .05 / M[m][5]; // the falling chunk cracks too
+    }
+
+    // blocked water pushes outward: its hydrostatic head loads every solid it touches (the floor is loaded by settle)
+    function waterPush() {
+      if (!(ADX | ADY)) return;
+      const fl = ADX + ADY * W;
+      for (let i = 0; i < N; i++) {
+        if (M[t[i]][2] !== 2) continue;
+        const head = (WA[i] + M[t[i]][3] * .125) * GM * .8, x = i % W, y = (i / W) | 0;
+        for (let d = 0; d < 4; d++) {
+          const nx = x + DX[d], ny = y + DY[d];
+          if (!inb(nx, ny)) continue;
+          const j = ny * W + nx;
+          if (j !== i + fl && M[t[j]][2] === 4) WL[j] += head;
+        }
+      }
+    }
+
+    // loose sand/water stacked on a solid presses down on it along the gravity axis
+    function settle() {
+      WA.fill(0);
+      if (!(ADX | ADY)) return;
+      const vert = ADY !== 0, A = vert ? W : H, B = vert ? H : W, fwd = vert ? ADY > 0 : ADX > 0;
+      for (let a = 0; a < A; a++) {
+        let acc = 0;
+        for (let b = 0; b < B; b++) {
+          const bb = fwd ? b : B - 1 - b, i = vert ? bb * W + a : a * W + bb, k = M[t[i]][2];
+          if (k === 4) { WL[i] += acc * GM; acc = 0; }
+          else { WA[i] = acc; if (k === 1 || k === 2) acc += M[t[i]][3] * .25; }
+        }
+      }
+    }
+
+    function structure() {
+      SR.fill(0); par.fill(-2);
+      let hd = 0, tl = 0;
+      const seed = i => { if (M[t[i]][2] === 4) { par[i] = -1; dep[i] = 0; q[tl++] = i; } };
+      if (ADX) for (let y = 0; y < H; y++) seed(y * W + (ADX > 0 ? W - 1 : 0));
+      else for (let x = 0; x < W; x++) seed((ADY < 0 ? 0 : H - 1) * W + x); // anchored to the floor edge
+      while (hd < tl) {
+        const i = q[hd++], x = i % W, y = (i / W) | 0;
+        for (let d = 0; d < 4; d++) {
+          const nx = x + DX[d], ny = y + DY[d];
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          const j = ny * W + nx;
+          if (par[j] === -2 && M[t[j]][2] === 4) { par[j] = i; dep[j] = dep[i] + 1; q[tl++] = j; }
+        }
+      }
+
+      for (let a = 0; a < tl; a++) {
+        const i = q[a]; ld[i] = M[t[i]][4] * GM + WL[i]; FS[i] = 0;
+      }
+
+      // load flows toward the anchor: each depth level first shares sideways, then splits over every support one step closer
+      const along = ADX ? 1 : W, lat = ADX ? W : 1;
+      for (let a = tl - 1; a >= 0;) {
+        const dd = dep[q[a]];
+        let b = a;
+        while (b > 0 && dep[q[b - 1]] === dd) b--;
+        for (let pass = 0; pass < 2; pass++) {
+          for (let c = b; c <= a; c++) {
+            const i = q[c], j = i + lat;
+            if (j < N && (ADX || i % W < W - 1) && par[j] !== -2 && dep[j] === dd) {
+              const f = (ld[i] - ld[j]) * .2; ld[i] -= f; ld[j] += f;
+            }
+          }
+        }
+        for (let c = b; c <= a; c++) {
+          const i = q[c], x = i % W, y = (i / W) | 0;
+          let tot = 0;
+          for (let d = 0; d < 4; d++) {
+            const nx = x + DX[d], ny = y + DY[d];
+            if (!inb(nx, ny)) continue;
+            const j = ny * W + nx;
+            if (par[j] !== -2 && dep[j] === dd - 1) tot += Math.abs(j - i) === along ? 1 : .4;
+          }
+          if (!tot) continue;
+          for (let d = 0; d < 4; d++) {
+            const nx = x + DX[d], ny = y + DY[d];
+            if (!inb(nx, ny)) continue;
+            const j = ny * W + nx;
+            if (par[j] !== -2 && dep[j] === dd - 1) ld[j] += ld[i] * (Math.abs(j - i) === along ? 1 : .64) / tot; // sideways hops cost extra (bending)
+          }
+        }
+        a = b - 1;
+      }
+
+      for (let a = 0; a < tl; a++) {
+        const i = q[a], m = t[i], x = i % W, y = (i / W) | 0;
+        let pl = 0;
+        for (let d = 0; d < 4; d++) {
+          const nx = x + DX[d], ny = y + DY[d];
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+          const j = ny * W + nx;
+          if (M[t[j]][2] < 4) pl += P[j];
+        }
+
+        const hw = M[m][7] ? Math.max(.12, 1 - Math.max(0, T[i] - 20) / M[m][7]) : 1; // heat scale 0 = heat-proof, not a divide by zero
+        const s = M[m][5] * hw * Math.max(.05, 1 - DMG[i]);
+        SR[i] = (ld[i] + pl * 20) / s;
+
+        const fd = ADY < 0 ? y : ADY > 0 ? H - 1 - y : ADX > 0 ? W - 1 - x : ADX < 0 ? x : H - 1 - y;
+        if (((SR[i] > 1 && rnd() < .3) || DMG[i] >= 1) && (fd >= 4 || m === 4)) { t[i] = 13; DMG[i] = 0; } // crumbles to rubble; only the bedrock rows are exempt, never wood
+      }
+
+      if (ADX | ADY) { // cut-off chunks fall as rigid bodies, floor side first
+        for (let u = 0; u < H; u++) {
+          for (let s = 0; s < W; s++) {
+            const y = ADY > 0 ? H - 1 - u : u, x = ADX > 0 ? W - 1 - s : s, i = y * W + x;
+            if (par[i] !== -2 || M[t[i]][2] !== 4) continue;
+            const nx = x + ADX, ny = y + ADY;
+            if (!inb(nx, ny)) continue;
+            const kb = M[t[ny * W + nx]][2];
+            const jn = ny * W + nx;
+            if (kb !== 4 && kb !== 1) { const f = FS[i] + 1; mv(i, jn); FS[jn] = f; }
+            else if (kb === 4 && par[jn] !== -2 && FS[i] > 1) { impact(jn, t[i], FS[i], i); FS[i] = 0; } // slammed into supported structure
+          }
+        }
+      }
+    }
+
+    function calculateNonsolidStress() {
+      for (let i = 0; i < N; i++) {
+        const m = t[i], k = M[m][2];
+        if (k === 4) continue;
+
+        let stress = 0;
+        let stressX = 0, stressY = 0;
+        stress += Math.abs(P[i]) * 0.8;
+        if (k === 2 || k === 3) stress += Math.abs(T[i] - 20) * 0.15;
+
+        if (k === 1 || k === 2) stress += WA[i];
+
+        stress += Math.abs(WF[i]) * M[m][8] * 0.3;
+
+        if (m === 2) {
+          const x = i % W;
+          const leftOpen = x > 0 && !t[i - 1] && P[i] > P[i - 1];
+          const rightOpen = x < W - 1 && !t[i + 1] && P[i] > P[i + 1];
+          if (leftOpen) stressX -= Math.max(0, P[i] - P[i - 1]) * 0.7;
+          if (rightOpen) stressX += Math.max(0, P[i] - P[i + 1]) * 0.7;
+          stress += Math.abs(stressX) * 0.7;
+        }
+
+        // Add kinetic energy-based stress (impact force)
+        stress += KE[i] * 0.15;
+
+        SR[i] = Math.min(2.0, stress * 0.25);
+
+        const mag = Math.sqrt(stressX * stressX + stressY * stressY);
+        if (mag > 0.1) {
+          SX[i] = (stressX / mag) * Math.min(1, mag * 0.5);
+          SY[i] = (stressY / mag) * Math.min(1, mag * 0.5);
+        } else {
+          SX[i] *= 0.8;
+          SY[i] *= 0.8;
+        }
+      }
+    }
+
+    function moveWithVelocity() {
+      for (let y = H - 1; y >= 0; y--) {
+        for (let x = 0; x < W; x++) {
+          const i = y * W + x;
+          const m = t[i];
+          if (!m || mk[i] === fr) continue;
+
+          const k = M[m][2];
+          if (k === 4 || k === 0) continue; // Solids and air don't move with velocity
+
+          const vx = VX[i];
+          const vy = VY[i];
+          const vMag = Math.sqrt(vx * vx + vy * vy);
+
+          if (vMag < 0.1) continue;
+
+          let moved = false;
+
+          if (Math.abs(vy) > 0.5 && y < H - 1) {
+            const moveDir = vy > 0 ? 1 : -1;
+            const ny = y + moveDir;
+            const j = ny * W + x;
+            if (ny >= 0 && ny < H) {
+              const target = t[j];
+              if (!target || (k === 2 && M[target][3] < M[m][3])) {
+                mv(i, j);
+                moved = true;
+                if (VY[j] * moveDir < vy * moveDir) VY[j] = vy * 0.7;
+                if (m === 2 && target && M[target][2] === 1) VY[target] = vy * 0.5;
+                if (target && M[target][2] === 4) P[j] += Math.abs(vy) * M[m][3] * 0.5;
+                continue;
+              }
+            }
+          }
+
+          if (!moved && Math.abs(vx) > 0.5 && x >= 0 && x < W - 1) {
+            const moveDir = vx > 0 ? 1 : -1;
+            const nx = x + moveDir;
+            const j = y * W + nx;
+            if (nx >= 0 && nx < W) {
+              const target = t[j];
+              if (!target || (k === 2 && M[target][3] < M[m][3])) {
+                mv(i, j);
+                moved = true;
+                if (VX[j] * moveDir < vx * moveDir) VX[j] = vx * 0.7;
+                if (m === 2 && target && M[target][2] === 1) VX[target] = vx * 0.5;
+                if (target && M[target][2] === 4) P[j] += Math.abs(vx) * M[m][3] * 0.5;
+                continue;
+              }
+            }
+          }
+
+          if (!moved && Math.abs(vx) > 0.3 && Math.abs(vy) > 0.3) {
+            const moveX = vx > 0 ? 1 : -1;
+            const moveY = vy > 0 ? 1 : -1;
+            const nx = x + moveX;
+            const ny = y + moveY;
+            if (nx >= 0 && nx < W && ny >= 0 && ny < H) {
+              const j = ny * W + nx;
+              const target = t[j];
+              if (!target || (k === 2 && M[target][3] < M[m][3])) {
+                mv(i, j);
+                if (target && M[target][2] === 4) P[j] += vMag * M[m][3] * 0.4;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    function step() {
+      fr++;
+      const w = wd.value / 10;
+      GX = +gx.value; GY = +gy.value; GM = Math.hypot(GX, GY); ADX = ADY = 0;
+      if (GM > .05) { if (Math.abs(GY) >= Math.abs(GX)) ADY = GY < 0 ? -1 : 1; else ADX = GX < 0 ? -1 : 1; }
+      WL.fill(0);
+
+      for (let y = 0; y < H; y++) {
+        let v = w; const d = w < 0 ? -1 : 1;
+        for (let x = d > 0 ? 0 : W - 1; x >= 0 && x < W; x += d) {
+          const i = y * W + x;
+          if (M[t[i]][2] === 4) {
+            WL[i] = Math.abs(v) * 4; v *= .15;
+          } else {
+            WF[i] = v; v += (w - v) * .12;
+          }
+        }
+      }
+
+      heat();
+      pressure();
+      applyGravity();
+      settle();
+      waterPush();
+
+      const dr = fr & 1;
+      for (let u = 0; u < H; u++) {
+        for (let s = 0; s < W; s++) {
+          const y = ADY > 0 ? H - 1 - u : u;
+          const x = ADX > 0 ? W - 1 - s : ADX < 0 ? s : (dr ? W - 1 - s : s), i = y * W + x;
+          let m = t[i];
+          if (!m || mk[i] === fr) continue;
+          const r = rnd();
+          if (DMG[i] && M[m][2] !== 4) DMG[i] = 0;
+
+          if (m === 2) {
+            if (T[i] > 100) { t[i] = m = 10; T[i] = 104; P[i] += 3; } else if (T[i] < 0 && r < .06) { t[i] = m = 15; }
+          } else if (m === 10) {
+            if (T[i] < 92 && r < .06) t[i] = m = 2;
+          } else if (m === 15) {
+            if (T[i] > 2 && r < .1) { t[i] = m = 2; T[i] = 2; }
+          } else if (m === 11) {
+            if (r < .012) { t[i] = 0; continue; }
+          } else if (m === 16) {
+            if (T[i] < 700) t[i] = m = 3;
+            else { T[i] += (1200 - T[i]) * .05; if (r < .6) continue; }
+          } else if (m === 6) {
+            if (T[i] > 300 && r < .02) { ig(i, 30); m = 9; }
+          } else if (m === 7) {
+            if (T[i] > 130 && r < .5) { ig(i, 8); P[i] += 8; T[i] = 900; m = 9; }
+          } else if (m === 8) {
+            if (T[i] > 140) { ig(i, 20); P[i] += 90; T[i] = 1000; m = 9; }
+          } else if (m === 4) {
+            if (T[i] > 260 && r < .04) { ig(i, 12); m = 9; }
+          }
+
+          if (m === 9) {
+            if ((L[i] -= 2) <= 0 || (y === 0 && r < .3)) { const z = rnd(); t[i] = z < .12 ? 12 : z < .35 ? 11 : 0; continue; }
+            if (T[i] < 650) T[i] = 650;
+            const d = (rnd() * 4) | 0, nx = x + DX[d], ny = y + DY[d];
+            if (nx >= 0 && ny >= 0 && nx < W && ny < H) {
+              const n = ny * W + nx, c = t[n];
+              if (c === 2) { t[i] = 10; T[i] = 105; P[i] += 1; continue; }
+              if ((c === 4 || c === 6 || c === 7 || c === 8) && rnd() < .3) T[n] += 150;
+            }
+          }
+
+          const k = M[m][2];
+          if (k < 1 || k > 3) continue;
+
+          let fx = WF[i] * M[m][8] * .5, fy = 0;
+          if (x > 0 && x < W - 1) fx += (P[i - 1] - P[i + 1]) * .06;
+          if (y > 0 && y < H - 1) fy = (P[i + W] - P[i - W]) * .06;
+
+          if (Math.abs(fx) > rnd()) {
+            const j = i + (fx > 0 ? 1 : -1);
+            if ((fx > 0 ? x < W - 1 : x > 0) && !t[j]) { mv(i, j); continue; }
+          }
+          if (Math.abs(fy) > rnd()) {
+            const j = i + (fy > 0 ? -W : W);
+            if (j >= 0 && j < N && !t[j]) { mv(i, j); continue; }
+          }
+
+          let gdx = 0, gdy = 0; // this cell's fall direction (diagonal gravity mixes both axes)
+          if (GM > .05) {
+            if (rnd() * (Math.abs(GX) + Math.abs(GY)) < Math.abs(GX)) gdx = GX < 0 ? -1 : 1;
+            else gdy = GY < 0 ? -1 : 1;
+          }
+          const px = gdy ? (rnd() < .5 ? -1 : 1) : 0, py = gdx ? (rnd() < .5 ? -1 : 1) : 0;
+          if (k === 3) {
+            const ux = x - gdx, uy = y - gdy;
+            if (!inb(ux, uy)) { if (r < .05) t[i] = 0; continue; }
+            if (gdx | gdy) {
+              const u = uy * W + ux, ku = M[t[u]][2];
+              if ((ku === 0 || (ku === 2 && m !== 9)) && rnd() < (m === 9 ? .6 : .8)) { mv(i, u); continue; }
+            }
+            let qx = px, qy = py;
+            if (!(gdx | gdy)) { const d = (rnd() * 4) | 0; qx = DX[d]; qy = DY[d]; }
+            if (inb(x + qx, y + qy) && !t[(y + qy) * W + x + qx] && rnd() < .6) mv(i, (y + qy) * W + x + qx);
+          } else if (gdx | gdy) {
+            const fx2 = x + gdx, fy2 = y + gdy, sx = x + px, sy = y + py;
+            if (inb(fx2, fy2)) {
+              const fj = fy2 * W + fx2, bt = t[fj];
+              if (sink(m, bt)) { const f = FS[i] + 1; mv(i, fj); FS[fj] = f; continue; }
+              if (FS[i] > 1 && M[bt][2] === 4) { impact(fj, m, FS[i]); FS[i] = 0; } // landed on a solid
+              if (inb(sx, sy) && inb(sx + gdx, sy + gdy)) {
+                const dg = (sy + gdy) * W + sx + gdx;
+                if (sink(m, t[dg]) && M[t[sy * W + sx]][2] !== 4) { mv(i, dg); continue; }
+              }
+            }
+            if (k === 2 && inb(sx, sy)) {
+              const ks = M[t[sy * W + sx]][2];
+              if (ks === 0 || ks === 3) mv(i, sy * W + sx);
+            }
+          }
+        }
+      }
+
+      moveWithVelocity();
+      structure();
+      calculateNonsolidStress();
+
+      // stress-controlled directional movement: things can be pushed by stress like water spreading
+      for (let y = H - 1; y >= 1; y--) {
+        for (let x = 1; x < W - 1; x++) {
+          const i = y * W + x;
+          const m = t[i];
+          if (!m || mk[i] === fr) continue;
+
+          const k = M[m][2];
+          if (k !== 1 && k !== 2) continue;
+
+          const sx = SX[i];
+          const sy = SY[i];
+
+          if (Math.abs(sx) > 0.12) {
+            const dir = sx > 0 ? 1 : -1;
+            const nx = x + dir;
+            const j = y * W + nx;
+            if (nx >= 0 && nx < W && !t[j] && rnd() < Math.abs(sx) * 0.6) {
+              mv(i, j);
+              continue;
+            }
+          }
+
+          if (Math.abs(sy) > 0.12) {
+            const dir = sy > 0 ? 1 : -1;
+            const ny = y + dir;
+            const j = ny * W + x;
+            if (ny >= 0 && ny < H && !t[j] && rnd() < Math.abs(sy) * 0.6) {
+              mv(i, j);
+              continue;
+            }
+          }
+        }
+      }
+
+      // water drag: liquid flow can carry nearby powder particles
+      for (let y = 1; y < H - 1; y++) {
+        for (let x = 1; x < W - 1; x++) {
+          const i = y * W + x;
+          if (t[i] !== 2) continue;
+
+          const vx = VX[i];
+          const vy = VY[i];
+          const vMag = Math.sqrt(vx * vx + vy * vy);
+          if (vMag < 0.15) continue;
+
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              const nx = x + dx, ny = y + dy;
+              if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+              const j = ny * W + nx;
+              if (t[j] && M[t[j]][2] === 1 && !mk[j]) {
+                VX[j] += vx * 0.18;
+                VY[j] += vy * 0.18;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    function reset() {
+      t.fill(0); T.fill(20); P.fill(0); L.fill(0);
+      VX.fill(0); VY.fill(0); KE.fill(0); SX.fill(0); SY.fill(0); DMG.fill(0); FS.fill(0);
+      const R = (a, b, c, d, m) => {
+        for (let y = b; y <= d; y++) {
+          for (let x = a; x <= c; x++) t[y * W + x] = m;
+        }
+      };
+      R(0, H - 4, W - 1, H - 1, 3);
+      R(18, H - 34, 22, H - 5, 3);
+      R(60, H - 16, 72, H - 15, 4);
+      R(60, H - 14, 61, H - 5, 4);
+      R(71, H - 14, 72, H - 5, 4);
+      R(125, H - 16, 138, H - 5, 5);
+      R(127, H - 14, 136, H - 7, 0);
+    }
+
+    const tools = [1, 2, 3, 4, 5, 6, 7, 8, 9, 14, 15, 16].map(m => ({ n: M[m][0], m })).concat([
+      { n: 'Heat', m: 'h' }, { n: 'Chill', m: 'c' }, { n: 'Erase', m: 'e' }
+    ]);
+
+    let tool = tools[0];
+    tools.forEach((o, n) => {
+      const b = document.createElement('button');
+      b.textContent = o.n;
+      if (typeof o.m === 'number') b.style.borderBottom = '4px solid rgb(' + M[o.m][1] + ')';
+      if (!n) b.className = 'on';
+      b.onclick = () => {
+        tool = o;
+        [...bar.children].forEach(x => x.classList.toggle('on', x === b));
+      };
+      bar.append(b);
+    });
+
+    const pos = e => {
+      const r = cv.getBoundingClientRect();
+      hx = Math.floor((e.clientX - r.left) / r.width * W);
+      hy = Math.floor((e.clientY - r.top) / r.height * H);
+    };
+
+    cv.onpointerdown = e => {
+      down = true; cv.setPointerCapture(e.pointerId); pos(e);
+    };
+    cv.onpointermove = pos;
+    cv.onpointerup = cv.onpointercancel = () => down = false;
+    cv.onpointerout = () => { if (!down) hx = -1; };
+
+    $('pz').onclick = e => {
+      paused = !paused;
+      e.target.textContent = paused ? 'Play' : 'Pause';
+    };
+    $('rs').onclick = reset;
+
+    function paint() {
+      const R = +br.value, m = tool.m;
+      if (R === 0) {
+        const i = hy * W + hx;
+        if (i < 0 || i >= N) return;
+        if (m === 'h') T[i] = Math.min(1500, T[i] + 60);
+        else if (m === 'c') T[i] = Math.max(-80, T[i] - 60);
+        else if (m === 'e') { t[i] = 0; T[i] = 20; P[i] = 0; VX[i] = 0; VY[i] = 0; SX[i] = 0; SY[i] = 0; DMG[i] = 0; FS[i] = 0; }
+        else if (!t[i] && (M[m][2] === 4 || rnd() < .4)) {
+          if (m === 9) ig(i, 14); else t[i] = m;
+        }
+        return;
+      }
+
+      for (let dy = -R; dy <= R; dy++) {
+        for (let dx = -R; dx <= R; dx++) {
+          if (dx * dx + dy * dy > R * R) continue;
+          const x = hx + dx, y = hy + dy;
+          if (x < 0 || y < 0 || x >= W || y >= H) continue;
+          const i = y * W + x;
+          if (m === 'h') T[i] = Math.min(1500, T[i] + 60);
+          else if (m === 'c') T[i] = Math.max(-80, T[i] - 60);
+          else if (m === 'e') { t[i] = 0; T[i] = 20; P[i] = 0; VX[i] = 0; VY[i] = 0; SX[i] = 0; SY[i] = 0; DMG[i] = 0; FS[i] = 0; }
+          else if (!t[i] && (M[m][2] === 4 || rnd() < .4)) {
+            if (m === 9) ig(i, 14); else t[i] = m;
+          }
+        }
+      }
+    }
+
+    function stressColor(value) {
+      const v = Math.min(1, Math.max(0, value));
+      const r = 30 + 225 * v;
+      const g = 50 + 170 * (1 - v) + 30 * v;
+      const b = 90 - 40 * v;
+      return [r, g, b];
+    }
+
+    function velocityColor(vx, vy) {
+      const mag = Math.sqrt(vx * vx + vy * vy);
+      const angle = Math.atan2(vy, vx);
+      const hue = ((angle + Math.PI) / (2 * Math.PI)) * 360;
+      const sat = Math.min(100, mag * 90);
+      const light = 50;
+      const c = new Uint8ClampedArray(3);
+      const h = hue / 60;
+      const s = sat / 100;
+      const l = light / 100;
+      const a = s * Math.min(l, 1 - l);
+      const f = (n) => {
+        const k = (n + h) % 6;
+        return l - a * Math.max(-1, Math.min(k - 3, Math.min(5 - k, 1)));
+      };
+      c[0] = f(5) * 255;
+      c[1] = f(3) * 255;
+      c[2] = f(1) * 255;
+      return [c[0], c[1], c[2]];
+    }
+
+    function draw() {
+      const d = img.data, view = vw.selectedIndex;
+      for (let i = 0; i < N; i++) {
+        const m = t[i], c = M[m][1], k = T[i], o = i * 4;
+        let r = c[0], g = c[1], b = c[2];
+
+        if (view === 1) {
+          r = Math.min(255, Math.max(0, (k - 20) * .9));
+          g = Math.min(255, Math.max(0, (k - 300) * .9));
+          b = Math.min(255, Math.max(0, (20 - k) * 4)) + (m ? 30 : 15);
+        } else if (view === 2) {
+          const v = Math.min(1, Math.max(0, P[i] / 12));
+          if (M[m][2] === 4) r = g = b = 60;
+          else { r = 30 + 225 * v; g = 40 + 90 * v; b = 90 - 40 * v; }
+        } else if (view === 3) {
+          if (M[m][2] === 4) {
+            const s = Math.min(1, SR[i]);
+            r = 60 + 195 * s; g = 210 - 180 * s; b = 70;
+          } else {
+            const s = Math.min(1, SR[i] * 2.2);
+            const col = stressColor(s);
+            r = col[0]; g = col[1]; b = col[2];
+          }
+        } else if (view === 4) {
+          const col = m ? velocityColor(VX[i], VY[i]) : c;
+          r = col[0]; g = col[1]; b = col[2];
+        } else if (m === 9) {
+          r = 255; g = 90 + rnd() * 110; b = 20;
+        } else {
+          let gl = Math.max(0, Math.min(1, (k - (m ? 200 : 60)) / 500));
+          if (!m) gl *= .5;
+          r += (255 - r) * gl;
+          g += (110 - g) * gl * .7;
+          b *= 1 - gl * .8;
+          if (k < 5) {
+            const f = Math.min(1, (5 - k) / 60);
+            b += (255 - b) * f * .6;
+            g += (255 - g) * f * .3;
+          }
+          if (m) {
+            const n = ((i * 7919) % 11) - 5;
+            r += n; g += n; b += n;
+            if (DMG[i] > .05) { const f = 1 - .5 * Math.min(1, DMG[i]); r *= f; g *= f; b *= f; } // cracks darken damaged blocks
+          }
+        }
+
+        d[o] = r; d[o + 1] = g; d[o + 2] = b; d[o + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+    }
+
+    function loop() {
+      if (down && hx >= 0) paint();
+      if (!paused) step();
+      draw();
+
+      if (hx >= 0 && hy >= 0 && hx < W && hy < H) {
+        const i = hy * W + hx;
+        const name = M[t[i]][0];
+        const vMag = Math.sqrt(VX[i] * VX[i] + VY[i] * VY[i]).toFixed(2);
+        inf.textContent = name + ' | ' + (T[i] | 0) + '°C | pressure ' + P[i].toFixed(1) + ' | vel ' + vMag + ' | stress ' + ((SR[i] * 100) | 0) + '%';
+      } else {
+        inf.textContent = 'Tilt gravity with the sliders. Sand and water piles load roofs, blasts crack walls, lava boils water. Try the Velocity view.';
+      }
+
+      requestAnimationFrame(loop);
+    }
+
+    reset();
+    loop();
+  </script>
+</body>
+</html>
