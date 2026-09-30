@@ -117,6 +117,7 @@
     // Velocity arrays for directional gravity and kinetic energy
     const VX = new Float32Array(N), VY = new Float32Array(N);
     const KE = new Float32Array(N); // Kinetic energy for impact calculations
+    const SX = new Float32Array(N), SY = new Float32Array(N); // directional stress vectors
 
     const cv = $('cv'), ctx = cv.getContext('2d'), img = ctx.createImageData(W, H);
     const wd = $('wd'), gx = $('gx'), gy = $('gy'), br = $('br'), vw = $('vw'), bar = $('bar'), inf = $('inf');
@@ -129,6 +130,8 @@
       a = L[i]; L[i] = L[j]; L[j] = a;
       a = VX[i]; VX[i] = VX[j]; VX[j] = a;
       a = VY[i]; VY[i] = VY[j]; VY[j] = a;
+      a = SX[i]; SX[i] = SX[j]; SX[j] = a;
+      a = SY[i]; SY[i] = SY[j]; SY[j] = a;
       mk[i] = mk[j] = fr;
     }
 
@@ -303,6 +306,7 @@
         if (k === 4) continue;
 
         let stress = 0;
+        let stressX = 0, stressY = 0;
         stress += Math.abs(P[i]) * 0.8;
         if (k === 2 || k === 3) stress += Math.abs(T[i] - 20) * 0.15;
 
@@ -317,11 +321,29 @@
         }
 
         stress += Math.abs(WF[i]) * M[m][8] * 0.3;
-        
+
+        if (m === 2) {
+          const x = i % W;
+          const leftOpen = x > 0 && !t[i - 1] && P[i] > P[i - 1];
+          const rightOpen = x < W - 1 && !t[i + 1] && P[i] > P[i + 1];
+          if (leftOpen) stressX -= Math.max(0, P[i] - P[i - 1]) * 0.7;
+          if (rightOpen) stressX += Math.max(0, P[i] - P[i + 1]) * 0.7;
+          stress += Math.abs(stressX) * 0.7;
+        }
+
         // Add kinetic energy-based stress (impact force)
         stress += KE[i] * 0.15;
-        
+
         SR[i] = Math.min(2.0, stress * 0.25);
+
+        const mag = Math.sqrt(stressX * stressX + stressY * stressY);
+        if (mag > 0.1) {
+          SX[i] = (stressX / mag) * Math.min(1, mag * 0.5);
+          SY[i] = (stressY / mag) * Math.min(1, mag * 0.5);
+        } else {
+          SX[i] *= 0.8;
+          SY[i] *= 0.8;
+        }
       }
     }
 
@@ -335,17 +357,14 @@
           const k = M[m][2];
           if (k === 4 || k === 0) continue; // Solids and air don't move with velocity
 
-          // Determine movement direction based on velocity
           const vx = VX[i];
           const vy = VY[i];
           const vMag = Math.sqrt(vx * vx + vy * vy);
 
           if (vMag < 0.1) continue;
 
-          // Try to move in primary velocity direction
           let moved = false;
 
-          // Vertical component (primary)
           if (Math.abs(vy) > 0.5 && y < H - 1) {
             const moveDir = vy > 0 ? 1 : -1;
             const ny = y + moveDir;
@@ -355,20 +374,14 @@
               if (!target || (k === 2 && M[target][3] < M[m][3])) {
                 mv(i, j);
                 moved = true;
-                // Transfer some velocity to target
-                if (VY[j] * moveDir < vy * moveDir) {
-                  VY[j] = vy * 0.7;
-                }
-                // Impact stress on collision
-                if (target && M[target][2] === 4) {
-                  P[j] += Math.abs(vy) * M[m][3] * 0.5;
-                }
+                if (VY[j] * moveDir < vy * moveDir) VY[j] = vy * 0.7;
+                if (m === 2 && target && M[target][2] === 1) VY[target] = vy * 0.5;
+                if (target && M[target][2] === 4) P[j] += Math.abs(vy) * M[m][3] * 0.5;
                 continue;
               }
             }
           }
 
-          // Horizontal component (secondary)
           if (!moved && Math.abs(vx) > 0.5 && x >= 0 && x < W - 1) {
             const moveDir = vx > 0 ? 1 : -1;
             const nx = x + moveDir;
@@ -378,18 +391,14 @@
               if (!target || (k === 2 && M[target][3] < M[m][3])) {
                 mv(i, j);
                 moved = true;
-                if (VX[j] * moveDir < vx * moveDir) {
-                  VX[j] = vx * 0.7;
-                }
-                if (target && M[target][2] === 4) {
-                  P[j] += Math.abs(vx) * M[m][3] * 0.5;
-                }
+                if (VX[j] * moveDir < vx * moveDir) VX[j] = vx * 0.7;
+                if (m === 2 && target && M[target][2] === 1) VX[target] = vx * 0.5;
+                if (target && M[target][2] === 4) P[j] += Math.abs(vx) * M[m][3] * 0.5;
                 continue;
               }
             }
           }
 
-          // Try diagonal if velocity is balanced
           if (!moved && Math.abs(vx) > 0.3 && Math.abs(vy) > 0.3) {
             const moveX = vx > 0 ? 1 : -1;
             const moveY = vy > 0 ? 1 : -1;
@@ -400,9 +409,7 @@
               const target = t[j];
               if (!target || (k === 2 && M[target][3] < M[m][3])) {
                 mv(i, j);
-                if (target && M[target][2] === 4) {
-                  P[j] += vMag * M[m][3] * 0.4;
-                }
+                if (target && M[target][2] === 4) P[j] += vMag * M[m][3] * 0.4;
               }
             }
           }
@@ -502,11 +509,72 @@
       moveWithVelocity();
       structure();
       calculateNonsolidStress();
+
+      // stress-controlled directional movement: things can be pushed by stress like water spreading
+      for (let y = H - 1; y >= 1; y--) {
+        for (let x = 1; x < W - 1; x++) {
+          const i = y * W + x;
+          const m = t[i];
+          if (!m || mk[i] === fr) continue;
+
+          const k = M[m][2];
+          if (k !== 1 && k !== 2) continue;
+
+          const sx = SX[i];
+          const sy = SY[i];
+
+          if (Math.abs(sx) > 0.12) {
+            const dir = sx > 0 ? 1 : -1;
+            const nx = x + dir;
+            const j = y * W + nx;
+            if (nx >= 0 && nx < W && !t[j] && rnd() < Math.abs(sx) * 0.6) {
+              mv(i, j);
+              continue;
+            }
+          }
+
+          if (Math.abs(sy) > 0.12) {
+            const dir = sy > 0 ? 1 : -1;
+            const ny = y + dir;
+            const j = ny * W + x;
+            if (ny >= 0 && ny < H && !t[j] && rnd() < Math.abs(sy) * 0.6) {
+              mv(i, j);
+              continue;
+            }
+          }
+        }
+      }
+
+      // water drag: liquid flow can carry nearby powder particles
+      for (let y = 1; y < H - 1; y++) {
+        for (let x = 1; x < W - 1; x++) {
+          const i = y * W + x;
+          if (t[i] !== 2) continue;
+
+          const vx = VX[i];
+          const vy = VY[i];
+          const vMag = Math.sqrt(vx * vx + vy * vy);
+          if (vMag < 0.15) continue;
+
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              if (dx === 0 && dy === 0) continue;
+              const nx = x + dx, ny = y + dy;
+              if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+              const j = ny * W + nx;
+              if (t[j] && M[t[j]][2] === 1 && !mk[j]) {
+                VX[j] += vx * 0.18;
+                VY[j] += vy * 0.18;
+              }
+            }
+          }
+        }
+      }
     }
 
     function reset() {
       t.fill(0); T.fill(20); P.fill(0); L.fill(0);
-      VX.fill(0); VY.fill(0); KE.fill(0);
+      VX.fill(0); VY.fill(0); KE.fill(0); SX.fill(0); SY.fill(0);
       const R = (a, b, c, d, m) => {
         for (let y = b; y <= d; y++) {
           for (let x = a; x <= c; x++) t[y * W + x] = m;
@@ -564,7 +632,7 @@
         if (i < 0 || i >= N) return;
         if (m === 'h') T[i] = Math.min(1500, T[i] + 60);
         else if (m === 'c') T[i] = Math.max(-80, T[i] - 60);
-        else if (m === 'e') { t[i] = 0; T[i] = 20; P[i] = 0; VX[i] = 0; VY[i] = 0; }
+        else if (m === 'e') { t[i] = 0; T[i] = 20; P[i] = 0; VX[i] = 0; VY[i] = 0; SX[i] = 0; SY[i] = 0; }
         else if (!t[i] && (M[m][2] === 4 || rnd() < .4)) {
           if (m === 9) ig(i, 14); else t[i] = m;
         }
@@ -579,7 +647,7 @@
           const i = y * W + x;
           if (m === 'h') T[i] = Math.min(1500, T[i] + 60);
           else if (m === 'c') T[i] = Math.max(-80, T[i] - 60);
-          else if (m === 'e') { t[i] = 0; T[i] = 20; P[i] = 0; VX[i] = 0; VY[i] = 0; }
+          else if (m === 'e') { t[i] = 0; T[i] = 20; P[i] = 0; VX[i] = 0; VY[i] = 0; SX[i] = 0; SY[i] = 0; }
           else if (!t[i] && (M[m][2] === 4 || rnd() < .4)) {
             if (m === 9) ig(i, 14); else t[i] = m;
           }
@@ -640,7 +708,6 @@
             r = col[0]; g = col[1]; b = col[2];
           }
         } else if (view === 4) {
-          // Velocity visualization
           const col = velocityColor(VX[i], VY[i]);
           r = col[0]; g = col[1]; b = col[2];
         } else if (m === 9) {
@@ -678,7 +745,7 @@
         const vMag = Math.sqrt(VX[i] * VX[i] + VY[i] * VY[i]).toFixed(2);
         inf.textContent = name + ' | ' + (T[i] | 0) + '°C | pressure ' + P[i].toFixed(1) + ' | vel ' + vMag + ' | stress ' + ((SR[i] * 100) | 0) + '%';
       } else {
-        inf.textContent = 'Gravity X/Y adjust directional gravity. Velocity impacts create realistic collisions. Heavier + faster = more stress on impact.';
+        inf.textContent = 'Gravity X/Y adjust directional gravity. Water stress pushes particles outward. Water carries nearby powder along with it.';
       }
 
       requestAnimationFrame(loop);
