@@ -128,8 +128,59 @@
     const wd = $('wd'), gx = $('gx'), gy = $('gy'), br = $('br'), vw = $('vw'), bar = $('bar'), inf = $('inf');
     let fr = 0, paused = false, down = false, hx = -1, hy = -1;
     function mv(i, j) { const a = t[i]; t[i] = t[j]; t[j] = a; }
-    function step() { /* original sandbox logic omitted here for brevity */ }
-    function reset() { t.fill(0); }
+
+    // simple step: basic falling sand + water behavior (lightweight, stable)
+    function step() {
+      // gravity & simple fluid simulation
+      for (let y = H - 1; y >= 0; y--) {
+        for (let x = 0; x < W; x++) {
+          const i = y * W + x;
+          const mat = t[i];
+          if (mat === 1) { // Sand
+            const below = i + W;
+            if (y + 1 < H && t[below] === 0) {
+              t[below] = mat; t[i] = 0; continue;
+            }
+            // try down-left / down-right
+            const dir = Math.random() < 0.5 ? -1 : 1;
+            const nx = x + dir, ny = y + 1;
+            if (inb(nx, ny) && t[ny * W + nx] === 0) {
+              mv(i, ny * W + nx); continue;
+            }
+          } else if (mat === 2) { // Water
+            const below = i + W;
+            if (y + 1 < H && t[below] === 0) { t[below] = mat; t[i] = 0; continue; }
+            // try left/right
+            const dirs = [ -1, 1 ];
+            if (Math.random() < 0.5) dirs.reverse();
+            for (let d of dirs) {
+              const nx = x + d;
+              if (inb(nx, y) && t[y * W + nx] === 0) { mv(i, y * W + nx); break; }
+            }
+          } else if (mat === 9) { // Fire slowly decays
+            if (Math.random() < 0.02) t[i] = 0;
+          }
+        }
+      }
+    }
+
+    function render() {
+      const d = img.data;
+      for (let i = 0, p = 0; i < N; i++, p += 4) {
+        const mat = t[i];
+        if (mat && typeof M[mat] !== 'undefined') {
+          const col = M[mat][1];
+          d[p] = col[0]; d[p+1] = col[1]; d[p+2] = col[2]; d[p+3] = 255;
+        } else {
+          // Air: draw darker background so it's visible
+          d[p] = 14; d[p+1] = 16; d[p+2] = 26; d[p+3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+    }
+
+    function reset() { t.fill(0); render(); }
+
     const tools = [1, 2, 3, 4, 5, 6, 7, 8, 9, 14, 15, 16].map(m => ({ n: M[m][0], m })).concat([{ n: 'Heat', m: 'h' }, { n: 'Chill', m: 'c' }, { n: 'Erase', m: 'e' }]);
     let tool = tools[0];
     tools.forEach((o, n) => {
@@ -139,7 +190,60 @@
       b.onclick = () => { tool = o; [...bar.children].forEach(x => x.classList.toggle('on', x === b)); };
       bar.append(b);
     });
-    function loop() { requestAnimationFrame(loop); }
+
+    function paintAt(cx, cy) {
+      const size = Math.max(0, Math.round(Number(br.value) || 1));
+      for (let dy = -size; dy <= size; dy++) {
+        for (let dx = -size; dx <= size; dx++) {
+          const x = cx + dx, y = cy + dy;
+          if (!inb(x, y)) continue;
+          const i = y * W + x;
+          if (tool.m === 'e') {
+            t[i] = 0;
+          } else if (tool.m === 'h') {
+            T[i] += 200;
+          } else if (tool.m === 'c') {
+            T[i] = Math.max(0, T[i] - 200);
+          } else if (typeof tool.m === 'number') {
+            t[i] = tool.m;
+          }
+        }
+      }
+    }
+
+    // pointer handling
+    cv.addEventListener('pointerdown', (ev) => {
+      down = true;
+      cv.setPointerCapture(ev.pointerId);
+      const rect = cv.getBoundingClientRect();
+      const x = Math.floor((ev.clientX - rect.left) / rect.width * W);
+      const y = Math.floor((ev.clientY - rect.top) / rect.height * H);
+      paintAt(x, y);
+      render();
+    });
+    cv.addEventListener('pointermove', (ev) => {
+      if (!down) return;
+      const rect = cv.getBoundingClientRect();
+      const x = Math.floor((ev.clientX - rect.left) / rect.width * W);
+      const y = Math.floor((ev.clientY - rect.top) / rect.height * H);
+      paintAt(x, y);
+      render();
+    });
+    window.addEventListener('pointerup', (ev) => { down = false; try { cv.releasePointerCapture(ev.pointerId); } catch (e) {} });
+
+    pz.onclick = () => { paused = !paused; pz.textContent = paused ? 'Resume' : 'Pause'; };
+    rs.onclick = () => { reset(); };
+
+    function loop() {
+      requestAnimationFrame(loop);
+      if (!paused) {
+        // run a small number of steps per frame for performance
+        for (let s = 0; s < 2; s++) step();
+        render();
+      }
+    }
+
+    // initial
     reset();
     loop();
   </script>
